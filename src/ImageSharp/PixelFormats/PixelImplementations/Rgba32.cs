@@ -430,7 +430,13 @@ public partial struct Rgba32 : IPixel<Rgba32>, IPackedVector<uint>
         vector += Half;
         vector = ColorNumerics.ClampToFinite(vector, Vector4.Zero, MaxBytes);
 
-        Vector128<byte> result = Vector128.ConvertToInt32(vector.AsVector128()).AsByte();
-        return new Rgba32(result.GetElement(0), result.GetElement(4), result.GetElement(8), result.GetElement(12));
+        // The clamp leaves every lane finite and in [0, 255] (NaN maps to 0). For such values the native truncating
+        // conversion gives the same integers as the saturating conversion, without its handling of out-of-range lanes.
+        // The shuffle moves the low byte of each 32-bit lane into the first four bytes (indices above 15 give 0), which is
+        // the R, G, B, A field order of this struct.
+        Vector128<byte> lanes = Vector128.ConvertToInt32Native(vector.AsVector128()).AsByte();
+        Vector128<byte> lowBytes = Vector128.Create((byte)0, 4, 8, 12, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
+        uint packed = Vector128.Shuffle(lanes, lowBytes).AsUInt32().ToScalar();
+        return Unsafe.As<uint, Rgba32>(ref packed);
     }
 }
