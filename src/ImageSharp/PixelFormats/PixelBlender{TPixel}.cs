@@ -328,7 +328,9 @@ public abstract class PixelBlender<TPixel>
         Guard.MustBeGreaterThanOrEqualTo(coverage.Length, maxLength, nameof(coverage.Length));
         Guard.MustBeGreaterThanOrEqualTo(workingBuffer.Length, maxLength * 2, nameof(workingBuffer.Length));
 
-        if (amount == 1F && this.CopiesOpaqueSourceAtFullCoverage && source.ToScaledVector4().W == 1F)
+        // Rows shorter than 32 pixels have little to copy, and the search for runs and the extra blend calls cost more
+        // than the copy saves when the coverage has no run of 1 (measured on 15-pixel rows).
+        if (maxLength >= 32 && amount == 1F && this.CopiesOpaqueSourceAtFullCoverage && source.ToScaledVector4().W == 1F)
         {
             this.BlendWithCoverageCopyingFullCoverage(configuration, destination[..maxLength], background, source, coverage, workingBuffer);
             return;
