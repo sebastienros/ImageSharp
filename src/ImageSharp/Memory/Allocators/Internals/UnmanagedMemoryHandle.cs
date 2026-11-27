@@ -41,6 +41,11 @@ internal struct UnmanagedMemoryHandle : IEquatable<UnmanagedMemoryHandle>
 
     public readonly IntPtr Handle => this.handle;
 
+    /// <summary>
+    /// Gets the length of the block in bytes.
+    /// </summary>
+    public readonly int LengthInBytes => this.lengthInBytes;
+
     public readonly bool IsInvalid => this.Handle == IntPtr.Zero;
 
     public readonly bool IsValid => this.Handle != IntPtr.Zero;

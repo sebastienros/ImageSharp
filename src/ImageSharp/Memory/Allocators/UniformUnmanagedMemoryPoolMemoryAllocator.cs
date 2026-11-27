@@ -20,6 +20,7 @@ internal sealed class UniformUnmanagedMemoryPoolMemoryAllocator : MemoryAllocato
 
     private readonly UniformUnmanagedMemoryPool pool;
     private readonly UnmanagedMemoryAllocator nonPoolAllocator;
+    private readonly LargeBufferCache? largeBufferCache;
 
     public UniformUnmanagedMemoryPoolMemoryAllocator(int? maxPoolSizeMegabytes)
         : this(
@@ -68,6 +69,15 @@ internal sealed class UniformUnmanagedMemoryPoolMemoryAllocator : MemoryAllocato
         this.trimSettings = trimSettings;
         this.pool = new UniformUnmanagedMemoryPool(this.poolBufferSizeInBytes, this.poolCapacity, this.trimSettings);
         this.nonPoolAllocator = new UnmanagedMemoryAllocator(unmanagedBufferSizeInBytes);
+
+        // Contiguous buffers above the pool block size come from new unmanaged blocks. A few returned blocks are kept for
+        // the next such request: up to a quarter of the pool size (at most 1 GB) in at most 8 blocks. A pool size of 0
+        // keeps none, and disabled trimming keeps none, because the cache trims with the pool's settings.
+        long largeCacheBytes = Math.Min(maxPoolSizeInBytes / 4, 1L << 30);
+        if (largeCacheBytes > poolBufferSizeInBytes && trimSettings.Enabled)
+        {
+            this.largeBufferCache = new LargeBufferCache(8, largeCacheBytes, trimSettings);
+        }
     }
 
     internal UniformUnmanagedMemoryPoolMemoryAllocator(
@@ -108,6 +118,24 @@ internal sealed class UniformUnmanagedMemoryPoolMemoryAllocator : MemoryAllocato
             }
         }
 
+        if (this.largeBufferCache is not null)
+        {
+            // A block from the cache, or a new block that the cache can take back when the buffer is released.
+            UnmanagedMemoryHandle block = this.largeBufferCache.Rent(lengthInBytes);
+            if (block.IsInvalid)
+            {
+                block = UnmanagedMemoryHandle.Allocate(lengthInBytes);
+            }
+
+            UnmanagedBuffer<T> buffer = new(length, new LargeBufferCache.ReturnToCacheLifetimeGuard(this.largeBufferCache, block));
+            if (options.Has(AllocationOptions.Clean))
+            {
+                buffer.GetSpan().Clear();
+            }
+
+            return buffer;
+        }
+
         return UnmanagedMemoryAllocator.AllocateBuffer<T>(length, options);
     }
 
@@ -144,7 +172,11 @@ internal sealed class UniformUnmanagedMemoryPoolMemoryAllocator : MemoryAllocato
         return MemoryGroup<T>.Allocate(this.nonPoolAllocator, totalLengthInElements, bufferAlignment, options);
     }
 
-    public override void ReleaseRetainedResources() => this.pool.Release();
+    public override void ReleaseRetainedResources()
+    {
+        this.pool.Release();
+        this.largeBufferCache?.Release();
+    }
 
     private static long GetDefaultMaxPoolSizeBytes()
     {
