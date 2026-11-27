@@ -33,6 +33,26 @@ internal sealed class PixelBlender<TPixel, TOperator> : PixelBlender<TPixel>
     public static PixelBlender<TPixel> Instance { get; } = new PixelBlender<TPixel, TOperator>();
 
     /// <inheritdoc />
+    /// <remarks>
+    /// True for the straight-alpha <c>NormalSrcOver</c> equations and pixel formats of 8-bit or 16-bit integer channels
+    /// with straight or no alpha. With source alpha 1 and amount 1, <c>Over</c> gives alpha 1 and the colour
+    /// <c>s * (1 - dW) + s * dW</c>, and the coverage mix at coverage 1 returns that result, divided by an alpha of 1.
+    /// Each step rounds within a few units of 2^-24, so every channel is within 1e-6 of the source channel, below half a
+    /// level of a 16-bit channel (7.6e-6), and the stored channel is the source channel. Float formats would store the
+    /// error, and associated-alpha formats use other equations, so they are not admitted.
+    /// </remarks>
+    private protected override bool CopiesOpaqueSourceAtFullCoverage
+        => typeof(TOperator) == typeof(DefaultPixelBlenderOperators.NormalSrcOver)
+        && (typeof(TPixel) == typeof(Rgba32)
+            || typeof(TPixel) == typeof(Bgra32)
+            || typeof(TPixel) == typeof(Argb32)
+            || typeof(TPixel) == typeof(Abgr32)
+            || typeof(TPixel) == typeof(Rgb24)
+            || typeof(TPixel) == typeof(Bgr24)
+            || typeof(TPixel) == typeof(Rgba64)
+            || typeof(TPixel) == typeof(Rgb48));
+
+    /// <inheritdoc />
     public override TPixel Blend(TPixel background, TPixel source, float amount)
     {
         // The operator type uniquely determines the alpha representation. NativeAOT therefore needs only the

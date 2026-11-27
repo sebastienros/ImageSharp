@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using SixLabors.ImageSharp.PixelFormats.PixelBlenders;
 
 namespace SixLabors.ImageSharp.PixelFormats;
@@ -17,6 +18,15 @@ public abstract class PixelBlender<TPixel>
     // PixelBlenders selects shared implementations of this type. This base class manages row buffers and composition calls.
     // Shared implementations supply composition arithmetic and select the alpha representation required by each equation.
     // PixelOperations owns pixel-buffer conversion, including format-specific overrides. Pixel formats own rounding and storage layout.
+
+    /// <summary>
+    /// Gets a value indicating whether an opaque constant source at amount 1 blends to the source pixel itself at
+    /// coverage 1, for every backdrop, so that such pixels can be written without the blend.
+    /// </summary>
+    /// <remarks>
+    /// Only a blender whose equations and pixel format make that exact may return <see langword="true"/>.
+    /// </remarks>
+    private protected virtual bool CopiesOpaqueSourceAtFullCoverage => false;
 
     /// <summary>
     /// Blend 2 pixels together.
@@ -318,12 +328,132 @@ public abstract class PixelBlender<TPixel>
         Guard.MustBeGreaterThanOrEqualTo(coverage.Length, maxLength, nameof(coverage.Length));
         Guard.MustBeGreaterThanOrEqualTo(workingBuffer.Length, maxLength * 2, nameof(workingBuffer.Length));
 
+        if (amount == 1F && this.CopiesOpaqueSourceAtFullCoverage && source.ToScaledVector4().W == 1F)
+        {
+            this.BlendWithCoverageCopyingFullCoverage(configuration, destination[..maxLength], background, source, coverage, workingBuffer);
+            return;
+        }
+
+        this.BlendWithCoverageCore(configuration, destination[..maxLength], background, source, amount, coverage, workingBuffer);
+    }
+
+    /// <summary>
+    /// Blends a row against an opaque constant source at amount 1: groups of 4 pixels whose coverage is exactly 1 receive
+    /// the source pixel, and the other pixels are blended through <see cref="BlendWithCoverageCore"/>.
+    /// </summary>
+    /// <remarks>
+    /// The vector blend runs over the first multiple of 4 pixels of a call (512-bit; 2 with 256-bit vectors) and the
+    /// scalar blend over the rest, and the two can differ in the last bit. Every blended piece therefore starts at a
+    /// multiple of 4 pixels of the row, and the last piece never holds only the last 2 or 3 pixels, so every pixel is
+    /// blended by the same loop as in one call for the whole row and the blended pixels keep their bytes.
+    /// The pieces are disjoint, so a destination that is the background is read before it is written.
+    /// </remarks>
+    /// <param name="configuration">The configuration.</param>
+    /// <param name="destination">The destination pixels, sliced to the row length.</param>
+    /// <param name="background">The background pixels.</param>
+    /// <param name="source">The opaque source pixel.</param>
+    /// <param name="coverage">The coverage values.</param>
+    /// <param name="workingBuffer">The vector scratch, at least 2 rows.</param>
+    private void BlendWithCoverageCopyingFullCoverage(
+        Configuration configuration,
+        Span<TPixel> destination,
+        ReadOnlySpan<TPixel> background,
+        TPixel source,
+        ReadOnlySpan<float> coverage,
+        Span<Vector4> workingBuffer)
+    {
+        const uint fullCoverage = 0x3F80_0000; // The bits of 1F; other values, also -0 and NaN, have other bits.
+        int length = destination.Length;
+
+        // Groups that may be copied. A remainder of 2 or 3 pixels stays with the group before it (see the remarks).
+        int groupEnd = length & ~3;
+        if ((length & 3) >= 2)
+        {
+            groupEnd -= 4;
+        }
+
+        ReadOnlySpan<uint> bits = MemoryMarshal.Cast<float, uint>(coverage[..length]);
+        int pending = 0;
+        int i = 0;
+        while (i < groupEnd)
+        {
+            int found = bits[i..groupEnd].IndexOf(fullCoverage);
+            if (found < 0)
+            {
+                break;
+            }
+
+            int runStart = (i + found + 3) & ~3;
+            if (runStart >= groupEnd)
+            {
+                break;
+            }
+
+            int other = bits[runStart..groupEnd].IndexOfAnyExcept(fullCoverage);
+            int runEnd = other < 0 ? groupEnd : (runStart + other) & ~3;
+            if (runEnd == runStart)
+            {
+                // The group at runStart has a value other than 1; search again after it.
+                i = runStart + other + 1;
+                continue;
+            }
+
+            if (runStart > pending)
+            {
+                this.BlendWithCoverageCore(
+                    configuration,
+                    destination[pending..runStart],
+                    background[pending..runStart],
+                    source,
+                    1F,
+                    coverage[pending..runStart],
+                    workingBuffer);
+            }
+
+            destination[runStart..runEnd].Fill(source);
+            pending = runEnd;
+            i = runEnd;
+        }
+
+        if (pending < length)
+        {
+            this.BlendWithCoverageCore(
+                configuration,
+                destination[pending..],
+                background[pending..length],
+                source,
+                1F,
+                coverage[pending..length],
+                workingBuffer);
+        }
+    }
+
+    /// <summary>
+    /// Blends a row against a constant source color with per-pixel coverage through the vector rows of the blender.
+    /// </summary>
+    /// <param name="configuration">The configuration.</param>
+    /// <param name="destination">The destination pixels; the length is the row length.</param>
+    /// <param name="background">The background pixels.</param>
+    /// <param name="source">The source pixel.</param>
+    /// <param name="amount">The amount, from 0 to 1.</param>
+    /// <param name="coverage">The coverage values.</param>
+    /// <param name="workingBuffer">The vector scratch, at least 2 rows.</param>
+    private void BlendWithCoverageCore(
+        Configuration configuration,
+        Span<TPixel> destination,
+        ReadOnlySpan<TPixel> background,
+        TPixel source,
+        float amount,
+        ReadOnlySpan<float> coverage,
+        Span<Vector4> workingBuffer)
+    {
+        int maxLength = destination.Length;
         Span<Vector4> destinationVectors = workingBuffer[..maxLength];
         Span<Vector4> backgroundVectors = workingBuffer.Slice(maxLength, maxLength);
 
         this.ToBlendVector4(configuration, background[..maxLength], backgroundVectors);
 
-        this.BlendWithCoverageFunction(destinationVectors, backgroundVectors, this.ToBlendVector4(source), amount, coverage);
+        this.BlendWithCoverageFunction(destinationVectors, backgroundVectors, this.ToBlendVector4(source), amount, coverage[..maxLength]);
 
         this.FromBlendVector4(configuration, destinationVectors, destination);
     }
