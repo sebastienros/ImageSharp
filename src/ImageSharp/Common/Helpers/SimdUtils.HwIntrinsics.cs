@@ -80,8 +80,11 @@ internal static partial class SimdUtils
                 }
 
                 // The rest is shorter than one step of the main loop. Convert whole pixels of it with narrower vectors,
-                // so that short rows and row tails do not take the scalar path.
-                ByteToNormalizedFloatTail<TAlpha>(ref source, ref destination);
+                // so that short rows and row tails do not take the scalar path. A row of whole steps skips the call.
+                if (source.Length >= 4)
+                {
+                    ByteToNormalizedFloatTail<TAlpha>(ref source, ref destination);
+                }
             }
         }
 
@@ -382,8 +385,11 @@ internal static partial class SimdUtils
                 }
 
                 // The rest is shorter than one step of the main loop. Convert whole pixels of it with narrower vectors,
-                // so that short rows and row tails do not take the scalar path.
-                FloatToByteSaturateTail<TAlpha>(ref source, ref destination, scaleFactor);
+                // so that short rows and row tails do not take the scalar path. A row of whole steps skips the call.
+                if (source.Length >= 4)
+                {
+                    FloatToByteSaturateTail<TAlpha>(ref source, ref destination, scaleFactor);
+                }
             }
         }
 
