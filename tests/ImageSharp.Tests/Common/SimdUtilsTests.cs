@@ -262,6 +262,84 @@ public partial class SimdUtilsTests
         Assert.Equal(expected, actual);
     }
 
+    [Fact]
+    public void ByteToNormalizedFloat_EveryShortLength_MatchesOracle_AtEveryVectorWidth() =>
+        FeatureTestRunner.RunWithHwIntrinsicsFeature(
+            RunByteToNormalizedFloatEveryShortLength,
+            HwIntrinsics.AllowAll | HwIntrinsics.DisableAVX512F | HwIntrinsics.DisableAVX2 | HwIntrinsics.DisableHWIntrinsic);
+
+    [Fact]
+    public void FloatToByteSaturate_EveryShortLength_MatchesOracle_AtEveryVectorWidth() =>
+        FeatureTestRunner.RunWithHwIntrinsicsFeature(
+            RunFloatToByteSaturateEveryShortLength,
+            HwIntrinsics.AllowAll | HwIntrinsics.DisableAVX512F | HwIntrinsics.DisableAVX2 | HwIntrinsics.DisableHWIntrinsic);
+
+    private static void RunByteToNormalizedFloatEveryShortLength()
+    {
+        // The lengths cover rows shorter than one main-loop step and every tail length after whole steps
+        // (64, 32, or 16 bytes per step), so each narrower step and the final single bytes run.
+        Random random = new(42);
+        for (int count = 0; count <= 130; count++)
+        {
+            byte[] source = new byte[count];
+            random.NextBytes(source);
+            float[] result = new float[count];
+            float[] expected = [.. source.Select(b => (float)(b / (double)byte.MaxValue))];
+
+            SimdUtils.ByteToNormalizedFloat(source, result);
+            Assert.Equal(expected, result);
+
+            // The alpha forms take whole RGBA pixels; the oracle applies the operator to each pixel of the oracle row.
+            int pixelBytes = count & ~3;
+            float[] associated = new float[pixelBytes];
+            SimdUtils.ByteToNormalizedFloat<PixelOperations.AssociateOperator>(source.AsSpan(0, pixelBytes), associated);
+            for (int i = 0; i < pixelBytes; i += 4)
+            {
+                Vector128<float> pixel = PixelOperations.AssociateOperator.Apply(Vector128.Create(expected[i], expected[i + 1], expected[i + 2], expected[i + 3]));
+                Assert.Equal(pixel, Vector128.Create(associated, i));
+            }
+        }
+    }
+
+    private static void RunFloatToByteSaturateEveryShortLength()
+    {
+        Random random = new(43);
+        float[] specials = [float.NaN, float.PositiveInfinity, float.NegativeInfinity, -0F, 0F, 1F, -1F, 2F, 1e30F, .5F / byte.MaxValue, 254.5F / byte.MaxValue];
+
+        // Scalar rule of the conversion: NaN to 0, clamp to [0, 1], then truncate(x * 255 + 0.5).
+        static byte Oracle(float x)
+        {
+            float clamped = x >= 0F ? (x > 1F ? 1F : x) : 0F;
+            return (byte)((clamped * byte.MaxValue) + .5F);
+        }
+
+        for (int count = 0; count <= 130; count++)
+        {
+            float[] source = new float[count];
+            for (int i = 0; i < count; i++)
+            {
+                source[i] = random.Next(5) == 0 ? specials[random.Next(specials.Length)] : (float)((random.NextDouble() * 1.5) - .25);
+            }
+
+            byte[] result = new byte[count];
+            SimdUtils.NormalizedFloatToByteSaturate(source, result);
+            Assert.Equal([.. source.Select(Oracle)], result);
+
+            // The unassociate form takes whole RGBA pixels: the operator per pixel, then the same rule per component.
+            int pixelFloats = count & ~3;
+            byte[] unassociated = new byte[pixelFloats];
+            SimdUtils.NormalizedFloatToByteSaturate<PixelOperations.UnassociateOperator>(source.AsSpan(0, pixelFloats), unassociated);
+            for (int i = 0; i < pixelFloats; i += 4)
+            {
+                Vector128<float> pixel = PixelOperations.UnassociateOperator.Apply(Vector128.Create(source, i));
+                for (int c = 0; c < 4; c++)
+                {
+                    Assert.Equal(Oracle(pixel.GetElement(c)), unassociated[i + c]);
+                }
+            }
+        }
+    }
+
     [Theory]
     [MemberData(nameof(ArbitraryArraySizes))]
     public void PackFromRgbPlanes_Rgb24(int count) => TestPackFromRgbPlanes<Rgb24>(

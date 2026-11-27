@@ -78,7 +78,78 @@ internal static partial class SimdUtils
                     source = source[adjustedCount..];
                     destination = destination[adjustedCount..];
                 }
+
+                // The rest is shorter than one step of the main loop. Convert whole pixels of it with narrower vectors,
+                // so that short rows and row tails do not take the scalar path.
+                ByteToNormalizedFloatTail<TAlpha>(ref source, ref destination);
             }
+        }
+
+        /// <summary>
+        /// Converts the bytes that remain after the main loop of <see cref="ByteToNormalizedFloat{TAlpha}"/> with narrower vectors:
+        /// 16 bytes per step with 512-bit vectors, 8 bytes per step with 256-bit vectors, then 4 bytes (one pixel) per step
+        /// with 128-bit vectors. It slices the spans past the converted bytes and keeps the last 0 to 3 bytes.
+        /// </summary>
+        /// <remarks>
+        /// Each step computes every float as the main loop does: the byte as a float, times the high part of 1 / 255 fused with
+        /// the product of the low part, so the floats do not depend on the width. Each step is a multiple of 4 bytes and
+        /// starts at a multiple of 4, so <typeparamref name="TAlpha"/> sees whole RGBA groups. Each step loads its bytes
+        /// before it stores its floats and the steps move forward, the order that the staging in
+        /// <c>Rgba32CompatiblePixelOperations{TPixel}.Unpack</c> needs.
+        /// </remarks>
+        /// <typeparam name="TAlpha">The alpha step that the conversion applies before each store.</typeparam>
+        /// <param name="source">The source buffer.</param>
+        /// <param name="destination">The destination buffer.</param>
+        private static void ByteToNormalizedFloatTail<TAlpha>(
+            ref ReadOnlySpan<byte> source,
+            ref Span<float> destination)
+            where TAlpha : struct, PixelFormats.PixelOperations.IAlphaOperator
+        {
+            const double reciprocal = 1D / byte.MaxValue;
+            const float reciprocalHigh = (float)reciprocal;
+            const float reciprocalLow = (float)(reciprocal - reciprocalHigh);
+
+            nuint length = (uint)source.Length;
+            nuint i = 0;
+            ref byte sourceBase = ref MemoryMarshal.GetReference(source);
+            ref float destinationBase = ref MemoryMarshal.GetReference(destination);
+
+            if (Vector512.IsHardwareAccelerated)
+            {
+                Vector512<float> high = Vector512.Create(reciprocalHigh);
+                Vector512<float> low = Vector512.Create(reciprocalLow);
+                for (; i + 16 <= length; i += 16)
+                {
+                    // 16 bytes widen to sixteen 32-bit lanes: four RGBA pixels.
+                    Vector512<float> f = Vector512.ConvertToSingle(Vector512_.Widen(Vector128.LoadUnsafe(ref sourceBase, i)));
+                    TAlpha.Apply(Vector512.FusedMultiplyAdd(f, high, f * low)).StoreUnsafe(ref destinationBase, i);
+                }
+            }
+            else if (Vector256.IsHardwareAccelerated)
+            {
+                Vector256<float> high = Vector256.Create(reciprocalHigh);
+                Vector256<float> low = Vector256.Create(reciprocalLow);
+                for (; i + 8 <= length; i += 8)
+                {
+                    // 8 bytes widen to eight 32-bit lanes: two RGBA pixels.
+                    Vector256<float> f = Vector256.ConvertToSingle(Vector256_.Widen(Vector64.LoadUnsafe(ref sourceBase, i)));
+                    TAlpha.Apply(Vector256.FusedMultiplyAdd(f, high, f * low)).StoreUnsafe(ref destinationBase, i);
+                }
+            }
+
+            Vector128<float> high128 = Vector128.Create(reciprocalHigh);
+            Vector128<float> low128 = Vector128.Create(reciprocalLow);
+            for (; i + 4 <= length; i += 4)
+            {
+                // One pixel: 4 bytes in the low lane widen to four 32-bit lanes. The values are below 256, so the
+                // signed conversion is exact.
+                Vector128<byte> bytes = Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref sourceBase, i))).AsByte();
+                Vector128<float> f = Vector128.ConvertToSingle(Vector128.WidenLower(Vector128.WidenLower(bytes)).AsInt32());
+                TAlpha.Apply(Vector128.FusedMultiplyAdd(f, high128, f * low128)).StoreUnsafe(ref destinationBase, i);
+            }
+
+            source = source[(int)i..];
+            destination = destination[(int)i..];
         }
 
         /// <summary>
@@ -309,7 +380,86 @@ internal static partial class SimdUtils
                     source = source[adjustedCount..];
                     destination = destination[adjustedCount..];
                 }
+
+                // The rest is shorter than one step of the main loop. Convert whole pixels of it with narrower vectors,
+                // so that short rows and row tails do not take the scalar path.
+                FloatToByteSaturateTail<TAlpha>(ref source, ref destination, scaleFactor);
             }
+        }
+
+        /// <summary>
+        /// Converts the floats that remain after the main loop of <see cref="FloatToByteSaturate{TAlpha}"/> with narrower
+        /// vectors: 16 floats per step with 512-bit vectors, 8 floats per step with 256-bit vectors, then 4 floats (one pixel)
+        /// per step with 128-bit vectors. It slices the spans past the converted floats and keeps the last 0 to 3 floats.
+        /// </summary>
+        /// <remarks>
+        /// Each step computes every byte as the main loop does: <typeparamref name="TAlpha"/>, the clamp to
+        /// [0, 255 / <paramref name="scaleFactor"/>] (NaN to 0), then truncate(x * scale + 0.5). The clamped value gives an
+        /// integer from 0 to 255, so the truncating narrows equal the saturating narrow of the main loop. Each step is a
+        /// multiple of 4 floats and starts at a multiple of 4, so <typeparamref name="TAlpha"/> sees whole RGBA groups.
+        /// Each step loads its floats before it stores its bytes, and the steps move forward: a destination that starts at
+        /// the source (the three-byte formats of <c>Rgba32CompatiblePixelOperations{TPixel}.Pack</c>) stays valid.
+        /// </remarks>
+        /// <typeparam name="TAlpha">The alpha step that the conversion applies before the scale.</typeparam>
+        /// <param name="source">The source buffer.</param>
+        /// <param name="destination">The destination buffer.</param>
+        /// <param name="scaleFactor">The factor applied before conversion.</param>
+        private static void FloatToByteSaturateTail<TAlpha>(
+            ref ReadOnlySpan<float> source,
+            ref Span<byte> destination,
+            float scaleFactor)
+            where TAlpha : struct, PixelFormats.PixelOperations.IAlphaOperator
+        {
+            nuint length = (uint)source.Length;
+            nuint i = 0;
+            ref float sourceBase = ref MemoryMarshal.GetReference(source);
+            ref byte destinationBase = ref MemoryMarshal.GetReference(destination);
+            float upperBound = byte.MaxValue / scaleFactor;
+
+            if (Vector512.IsHardwareAccelerated)
+            {
+                Vector512<float> scale = Vector512.Create(scaleFactor);
+                Vector512<float> upper = Vector512.Create(upperBound);
+                Vector512<float> half = Vector512.Create(.5F);
+                for (; i + 16 <= length; i += 16)
+                {
+                    Vector512<float> f = ColorNumerics.ClampToFinite(TAlpha.Apply(Vector512.LoadUnsafe(ref sourceBase, i)), Vector512<float>.Zero, upper);
+                    Vector512<int> n = Vector512.ConvertToInt32Native((f * scale) + half);
+
+                    // The first 16 lanes of each narrow hold n in order.
+                    Vector512<short> s = Vector512.Narrow(n, n);
+                    Vector512.Narrow(s, s).AsByte().GetLower().GetLower().StoreUnsafe(ref destinationBase, i);
+                }
+            }
+            else if (Vector256.IsHardwareAccelerated)
+            {
+                Vector256<float> scale = Vector256.Create(scaleFactor);
+                Vector256<float> upper = Vector256.Create(upperBound);
+                Vector256<float> half = Vector256.Create(.5F);
+                for (; i + 8 <= length; i += 8)
+                {
+                    Vector256<float> f = ColorNumerics.ClampToFinite(TAlpha.Apply(Vector256.LoadUnsafe(ref sourceBase, i)), Vector256<float>.Zero, upper);
+                    Vector256<int> n = Vector256.ConvertToInt32Native((f * scale) + half);
+                    Vector256<short> s = Vector256.Narrow(n, n);
+                    ulong bytes = Vector256.Narrow(s, s).AsUInt64().ToScalar();
+                    Unsafe.WriteUnaligned(ref Unsafe.Add(ref destinationBase, i), bytes);
+                }
+            }
+
+            Vector128<float> scale128 = Vector128.Create(scaleFactor);
+            Vector128<float> upper128 = Vector128.Create(upperBound);
+            Vector128<float> half128 = Vector128.Create(.5F);
+            for (; i + 4 <= length; i += 4)
+            {
+                Vector128<float> f = ColorNumerics.ClampToFinite(TAlpha.Apply(Vector128.LoadUnsafe(ref sourceBase, i)), Vector128<float>.Zero, upper128);
+                Vector128<int> n = Vector128.ConvertToInt32Native((f * scale128) + half128);
+                Vector128<short> s = Vector128.Narrow(n, n);
+                uint bytes = Vector128.Narrow(s, s).AsUInt32().ToScalar();
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref destinationBase, i), bytes);
+            }
+
+            source = source[(int)i..];
+            destination = destination[(int)i..];
         }
 
         /// <summary>
