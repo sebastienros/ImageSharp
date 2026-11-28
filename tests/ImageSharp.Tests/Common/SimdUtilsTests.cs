@@ -325,6 +325,12 @@ public partial class SimdUtilsTests
             SimdUtils.NormalizedFloatToByteSaturate(source, result);
             Assert.Equal([.. source.Select(Oracle)], result);
 
+            // The byte-magnitude form (scale 1, used for associated pixels) clamps to [0, 255] and then rounds the same way.
+            float[] magnitudes = [.. source.Select(x => x * byte.MaxValue)];
+            byte[] magnitudeResult = new byte[count];
+            SimdUtils.FloatToByteSaturate(magnitudes, magnitudeResult);
+            Assert.Equal([.. magnitudes.Select(x => (byte)((x >= 0F ? (x > byte.MaxValue ? byte.MaxValue : x) : 0F) + .5F))], magnitudeResult);
+
             // The unassociate form takes whole RGBA pixels: the operator per pixel, then the same rule per component.
             int pixelFloats = count & ~3;
             byte[] unassociated = new byte[pixelFloats];

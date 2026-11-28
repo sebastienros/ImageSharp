@@ -14,6 +14,18 @@ internal static partial class SimdUtils
     public static partial class HwIntrinsics
     {
         /// <summary>
+        /// The high part of 1 / 255 as a float. <c>FusedMultiplyAdd(b, ByteReciprocalHigh, b * ByteReciprocalLow)</c> gives
+        /// the correctly rounded <c>b / 255F</c> for every byte <c>b</c> without a division. The main loops and the tails of
+        /// the byte-to-float conversions share these parts, so a float does not depend on the step that converts it.
+        /// </summary>
+        private const float ByteReciprocalHigh = (float)(1D / byte.MaxValue);
+
+        /// <summary>
+        /// The low part of 1 / 255: the difference between 1 / 255 in double precision and <see cref="ByteReciprocalHigh"/>.
+        /// </summary>
+        private const float ByteReciprocalLow = (float)((1D / byte.MaxValue) - ByteReciprocalHigh);
+
+        /// <summary>
         /// Count the number of leading zero bits in a mask.
         /// Similar in behavior to the x86 instruction LZCNT.
         /// </summary>
@@ -108,10 +120,6 @@ internal static partial class SimdUtils
             ref Span<float> destination)
             where TAlpha : struct, PixelFormats.PixelOperations.IAlphaOperator
         {
-            const double reciprocal = 1D / byte.MaxValue;
-            const float reciprocalHigh = (float)reciprocal;
-            const float reciprocalLow = (float)(reciprocal - reciprocalHigh);
-
             nuint length = (uint)source.Length;
             nuint i = 0;
             ref byte sourceBase = ref MemoryMarshal.GetReference(source);
@@ -119,8 +127,8 @@ internal static partial class SimdUtils
 
             if (Vector512.IsHardwareAccelerated)
             {
-                Vector512<float> high = Vector512.Create(reciprocalHigh);
-                Vector512<float> low = Vector512.Create(reciprocalLow);
+                Vector512<float> high = Vector512.Create(ByteReciprocalHigh);
+                Vector512<float> low = Vector512.Create(ByteReciprocalLow);
                 for (; i + 16 <= length; i += 16)
                 {
                     // 16 bytes widen to sixteen 32-bit lanes: four RGBA pixels.
@@ -130,8 +138,8 @@ internal static partial class SimdUtils
             }
             else if (Vector256.IsHardwareAccelerated)
             {
-                Vector256<float> high = Vector256.Create(reciprocalHigh);
-                Vector256<float> low = Vector256.Create(reciprocalLow);
+                Vector256<float> high = Vector256.Create(ByteReciprocalHigh);
+                Vector256<float> low = Vector256.Create(ByteReciprocalLow);
                 for (; i + 8 <= length; i += 8)
                 {
                     // 8 bytes widen to eight 32-bit lanes: two RGBA pixels.
@@ -140,8 +148,8 @@ internal static partial class SimdUtils
                 }
             }
 
-            Vector128<float> high128 = Vector128.Create(reciprocalHigh);
-            Vector128<float> low128 = Vector128.Create(reciprocalLow);
+            Vector128<float> high128 = Vector128.Create(ByteReciprocalHigh);
+            Vector128<float> low128 = Vector128.Create(ByteReciprocalLow);
             for (; i + 4 <= length; i += 4)
             {
                 // One pixel: 4 bytes in the low lane widen to four 32-bit lanes. The values are below 256, so the
@@ -184,10 +192,6 @@ internal static partial class SimdUtils
             Span<float> destination)
             where TAlpha : struct, PixelFormats.PixelOperations.IAlphaOperator
         {
-            const double reciprocal = 1D / byte.MaxValue;
-            const float reciprocalHigh = (float)reciprocal;
-            const float reciprocalLow = (float)(reciprocal - reciprocalHigh);
-
             if (Vector512.IsHardwareAccelerated)
             {
                 DebugVerifySpanInput(source, destination, Vector512<byte>.Count);
@@ -196,8 +200,8 @@ internal static partial class SimdUtils
 
                 ref byte sourceBase = ref MemoryMarshal.GetReference(source);
                 ref Vector512<float> destinationBase = ref Unsafe.As<float, Vector512<float>>(ref MemoryMarshal.GetReference(destination));
-                Vector512<float> high = Vector512.Create(reciprocalHigh);
-                Vector512<float> low = Vector512.Create(reciprocalLow);
+                Vector512<float> high = Vector512.Create(ByteReciprocalHigh);
+                Vector512<float> low = Vector512.Create(ByteReciprocalLow);
 
                 for (nuint i = 0; i < n; i++)
                 {
@@ -237,8 +241,8 @@ internal static partial class SimdUtils
 
                 ref byte sourceBase = ref MemoryMarshal.GetReference(source);
                 ref Vector256<float> destinationBase = ref Unsafe.As<float, Vector256<float>>(ref MemoryMarshal.GetReference(destination));
-                Vector256<float> high = Vector256.Create(reciprocalHigh);
-                Vector256<float> low = Vector256.Create(reciprocalLow);
+                Vector256<float> high = Vector256.Create(ByteReciprocalHigh);
+                Vector256<float> low = Vector256.Create(ByteReciprocalLow);
 
                 for (nuint i = 0; i < n; i++)
                 {
@@ -278,8 +282,8 @@ internal static partial class SimdUtils
                 ref byte sourceBase = ref MemoryMarshal.GetReference(source);
                 ref Vector128<float> destinationBase = ref Unsafe.As<float, Vector128<float>>(ref MemoryMarshal.GetReference(destination));
 
-                Vector128<float> high = Vector128.Create(reciprocalHigh);
-                Vector128<float> low = Vector128.Create(reciprocalLow);
+                Vector128<float> high = Vector128.Create(ByteReciprocalHigh);
+                Vector128<float> low = Vector128.Create(ByteReciprocalLow);
 
                 for (nuint i = 0; i < n; i++)
                 {
@@ -446,6 +450,8 @@ internal static partial class SimdUtils
                 {
                     Vector256<float> f = ColorNumerics.ClampToFinite(TAlpha.Apply(Vector256.LoadUnsafe(ref sourceBase, i)), Vector256<float>.Zero, upper);
                     Vector256<int> n = Vector256.ConvertToInt32Native((f * scale) + half);
+
+                    // Narrow(x, x) puts the narrowed lanes of x first, so the low 8 bytes of the second narrow hold n in order.
                     Vector256<short> s = Vector256.Narrow(n, n);
                     ulong bytes = Vector256.Narrow(s, s).AsUInt64().ToScalar();
                     Unsafe.WriteUnaligned(ref Unsafe.Add(ref destinationBase, i), bytes);
@@ -459,6 +465,8 @@ internal static partial class SimdUtils
             {
                 Vector128<float> f = ColorNumerics.ClampToFinite(TAlpha.Apply(Vector128.LoadUnsafe(ref sourceBase, i)), Vector128<float>.Zero, upper128);
                 Vector128<int> n = Vector128.ConvertToInt32Native((f * scale128) + half128);
+
+                // As above: the low 4 bytes of the second narrow hold n in order.
                 Vector128<short> s = Vector128.Narrow(n, n);
                 uint bytes = Vector128.Narrow(s, s).AsUInt32().ToScalar();
                 Unsafe.WriteUnaligned(ref Unsafe.Add(ref destinationBase, i), bytes);
