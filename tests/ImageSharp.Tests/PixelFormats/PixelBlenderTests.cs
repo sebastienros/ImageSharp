@@ -1196,15 +1196,15 @@ public class PixelBlenderTests
         AssertOpaqueSourceAtFullCoverage<Rgb48>();
     }
 
-    // Values next to 1 that the copy must not take for 1: NaN, -0, a value above 1 that the blend clamps, and the next float above 1.
-    private static readonly float[] OtherCoverage = [float.NaN, -0F, 1.5F, BitConverter.Int32BitsToSingle(0x3F80_0001)];
-
     private static void AssertOpaqueSourceAtFullCoverage<TPixel>()
         where TPixel : unmanaged, IPixel<TPixel>
     {
         // A pixel with coverage exactly 1 must get the opaque source pixel. Every other pixel must get the bytes that the
         // row gives when no coverage is 1 (each 1 lowered to the next float below 1), which keeps the blend path unchanged.
         PixelBlender<TPixel> blender = PixelBlenders<TPixel>.NormalSrcOver;
+
+        // Values next to 1 that the copy must not take for 1: NaN, -0, a value above 1 that the blend clamps, and the next float above 1.
+        float[] otherCoverage = [float.NaN, -0F, 1.5F, BitConverter.Int32BitsToSingle(0x3F80_0001)];
         Random random = new(11);
         for (int length = 0; length <= 80; length++)
         {
@@ -1222,7 +1222,7 @@ public class PixelBlenderTests
                         1 => random.Next(4) == 0 ? (float)random.NextDouble() : 1F,
                         2 => (i < 2 || i >= length - 2) ? (float)random.NextDouble() : 1F,
                         3 => i % 7 == 3 ? 0F : 1F,
-                        4 => random.Next(8) == 0 ? OtherCoverage[random.Next(OtherCoverage.Length)] : 1F,
+                        4 => random.Next(8) == 0 ? otherCoverage[random.Next(otherCoverage.Length)] : 1F,
                         _ => (float)random.NextDouble(),
                     };
                 }
