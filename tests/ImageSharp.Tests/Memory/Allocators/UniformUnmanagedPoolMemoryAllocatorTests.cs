@@ -302,6 +302,32 @@ public class UniformUnmanagedPoolMemoryAllocatorTests
     }
 
     [Fact]
+    public void Allocate_AboveBlockSize_DroppedAllocator_FreesCachedBlock()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            // The allocator keeps the returned block. When the allocator is dropped without ReleaseRetainedResources,
+            // finalization must free the block, as it frees the blocks of the pool.
+            AllocateAndReturnAboveBlockSize();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            Assert.Equal(0, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void AllocateAndReturnAboveBlockSize()
+        {
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 16 * 512, 1024);
+            allocator.Allocate<byte>(1500).Dispose();
+            Assert.Equal(1, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+    }
+
+    [Fact]
     public void Allocate_AboveBlockSize_WithoutPool_FreesBlockOnDispose()
     {
         RemoteExecutor.Invoke(RunTest).Dispose();
