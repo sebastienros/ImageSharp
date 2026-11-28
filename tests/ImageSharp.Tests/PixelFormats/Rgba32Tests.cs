@@ -4,6 +4,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Tests.TestUtilities;
 
 namespace SixLabors.ImageSharp.Tests.PixelFormats;
 
@@ -136,7 +137,14 @@ public class Rgba32Tests
     }
 
     [Fact]
-    public void Rgba32_FromVector4_RoundsClampsAndMapsNaNToZero()
+    public void Rgba32_FromVector4_RoundsClampsAndMapsNaNToZero() =>
+
+        // Pack has a vector path and a path for runtimes without acceleration; both must follow the rule.
+        FeatureTestRunner.RunWithHwIntrinsicsFeature(
+            RunFromVector4RoundsClampsAndMapsNaNToZero,
+            HwIntrinsics.AllowAll | HwIntrinsics.DisableHWIntrinsic);
+
+    private static void RunFromVector4RoundsClampsAndMapsNaNToZero()
     {
         // Each component: scale by 255, add one half, clamp to [0, 255] with NaN as 0, truncate.
         static byte Expected(float x)
