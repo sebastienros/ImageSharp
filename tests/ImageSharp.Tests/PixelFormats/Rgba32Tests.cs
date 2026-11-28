@@ -4,6 +4,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Tests.TestUtilities;
 
 namespace SixLabors.ImageSharp.Tests.PixelFormats;
 
@@ -133,6 +134,41 @@ public class Rgba32Tests
         Assert.Equal(1, actual.Y);
         Assert.Equal(1, actual.Z);
         Assert.Equal(1, actual.W);
+    }
+
+    [Fact]
+    public void Rgba32_FromVector4_RoundsClampsAndMapsNaNToZero() =>
+
+        // Pack has a vector path and a path for runtimes without acceleration; both must follow the rule.
+        FeatureTestRunner.RunWithHwIntrinsicsFeature(
+            RunFromVector4RoundsClampsAndMapsNaNToZero,
+            HwIntrinsics.AllowAll | HwIntrinsics.DisableHWIntrinsic);
+
+    private static void RunFromVector4RoundsClampsAndMapsNaNToZero()
+    {
+        // Each component: scale by 255, add one half, clamp to [0, 255] with NaN as 0, truncate.
+        static byte Expected(float x)
+        {
+            float scaled = (x * byte.MaxValue) + .5F;
+            return (byte)(scaled > byte.MaxValue ? byte.MaxValue : scaled >= 0F ? scaled : 0F);
+        }
+
+        float[] specials =
+        [
+            float.NaN, float.PositiveInfinity, float.NegativeInfinity, -0F, 0F, 1F, -1F, 2F, 1e30F, -1e30F, float.Epsilon,
+            .5F / byte.MaxValue, 1.5F / byte.MaxValue, 254.5F / byte.MaxValue, 1F - 1e-7F, 1F + 1e-7F
+        ];
+
+        Random random = new(7);
+        for (int i = 0; i < 20_000; i++)
+        {
+            float Next() => i % 2 == 0 ? specials[random.Next(specials.Length)] : (float)((random.NextDouble() * 1.5) - .25);
+            Vector4 source = new(Next(), Next(), Next(), Next());
+
+            Rgba32 actual = Rgba32.FromVector4(source);
+
+            Assert.Equal(new Rgba32(Expected(source.X), Expected(source.Y), Expected(source.Z), Expected(source.W)), actual);
+        }
     }
 
     [Fact]
