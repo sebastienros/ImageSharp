@@ -234,6 +234,113 @@ public class UniformUnmanagedPoolMemoryAllocatorTests
     }
 
     [Fact]
+    public void Allocate_AboveBlockSize_ReusesReturnedBlock()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            // Pool blocks of 512 bytes, so 1500 and 1200 bytes come from the path for larger contiguous buffers.
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 16 * 512, 1024);
+            IMemoryOwner<byte> first = allocator.Allocate<byte>(1500);
+            first.Memory.Span.Fill(42);
+            first.Dispose();
+
+            // The returned block stays allocated and serves the next request that it holds.
+            Assert.Equal(1, UnmanagedMemoryHandle.TotalOutstandingHandles);
+            using (IMemoryOwner<byte> second = allocator.Allocate<byte>(1200, AllocationOptions.Clean))
+            {
+                Assert.Equal(1, UnmanagedMemoryHandle.TotalOutstandingHandles);
+                Assert.Equal(1200, second.Memory.Length);
+                Assert.True(second.Memory.Span.IndexOfAnyExcept((byte)0) < 0);
+            }
+
+            allocator.ReleaseRetainedResources();
+            Assert.Equal(0, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+    }
+
+    [Fact]
+    public void Allocate_AboveBlockSize_DoesNotReuseBlockMoreThanTwiceTheRequest()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 16 * 512, 1024);
+            allocator.Allocate<byte>(2000).Dispose();
+            Assert.Equal(1, UnmanagedMemoryHandle.TotalOutstandingHandles);
+
+            // 2000 bytes would waste more than half of themselves for 900 bytes, so a new block is allocated.
+            using (allocator.Allocate<byte>(900))
+            {
+                Assert.Equal(2, UnmanagedMemoryHandle.TotalOutstandingHandles);
+            }
+
+            allocator.ReleaseRetainedResources();
+            Assert.Equal(0, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+    }
+
+    [Fact]
+    public void Allocate_AboveBlockSize_Finalization_ReturnsBlockForReuse()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 16 * 512, 1024);
+            AllocateSingleAndForget(allocator, 1500);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            // The finalized buffer gave its block back, so this request needs no new block.
+            using (allocator.Allocate<byte>(1500))
+            {
+                Assert.True(UnmanagedMemoryHandle.TotalOutstandingHandles <= 1);
+            }
+        }
+    }
+
+    [Fact]
+    public void Allocate_AboveBlockSize_DroppedAllocator_FreesCachedBlock()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            // The allocator keeps the returned block. When the allocator is dropped without ReleaseRetainedResources,
+            // finalization must free the block, as it frees the blocks of the pool.
+            AllocateAndReturnAboveBlockSize();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            Assert.Equal(0, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void AllocateAndReturnAboveBlockSize()
+        {
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 16 * 512, 1024);
+            allocator.Allocate<byte>(1500).Dispose();
+            Assert.Equal(1, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+    }
+
+    [Fact]
+    public void Allocate_AboveBlockSize_WithoutPool_FreesBlockOnDispose()
+    {
+        RemoteExecutor.Invoke(RunTest).Dispose();
+        static void RunTest()
+        {
+            // A maximum pool size of 0 keeps no memory, also not for the larger contiguous buffers.
+            UniformUnmanagedMemoryPoolMemoryAllocator allocator = new(128, 512, 0, 1024);
+            allocator.Allocate<byte>(1500).Dispose();
+            Assert.Equal(0, UnmanagedMemoryHandle.TotalOutstandingHandles);
+        }
+    }
+
+    [Fact]
     public void ReleaseRetainedResources_ShouldFreePooledMemory()
     {
         RemoteExecutor.Invoke(RunTest).Dispose();
