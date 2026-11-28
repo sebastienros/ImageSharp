@@ -1182,4 +1182,74 @@ public class PixelBlenderTests
 
         return destination[0];
     }
+
+    [Fact]
+    public void BlendWithCoverage_OpaqueSourceAtFullCoverage_WritesSourceAndKeepsOtherPixels()
+    {
+        AssertOpaqueSourceAtFullCoverage<Rgba32>();
+        AssertOpaqueSourceAtFullCoverage<Bgra32>();
+        AssertOpaqueSourceAtFullCoverage<Argb32>();
+        AssertOpaqueSourceAtFullCoverage<Abgr32>();
+        AssertOpaqueSourceAtFullCoverage<Rgb24>();
+        AssertOpaqueSourceAtFullCoverage<Bgr24>();
+        AssertOpaqueSourceAtFullCoverage<Rgba64>();
+        AssertOpaqueSourceAtFullCoverage<Rgb48>();
+    }
+
+    private static void AssertOpaqueSourceAtFullCoverage<TPixel>()
+        where TPixel : unmanaged, IPixel<TPixel>
+    {
+        // A pixel with coverage exactly 1 must get the opaque source pixel. Every other pixel must get the bytes that the
+        // row gives when no coverage is 1 (each 1 lowered to the next float below 1), which keeps the blend path unchanged.
+        PixelBlender<TPixel> blender = PixelBlenders<TPixel>.NormalSrcOver;
+
+        // Values next to 1 that the copy must not take for 1: NaN, -0, a value above 1 that the blend clamps, and the next float above 1.
+        float[] otherCoverage = [float.NaN, -0F, 1.5F, BitConverter.Int32BitsToSingle(0x3F80_0001)];
+        Random random = new(11);
+        for (int length = 0; length <= 80; length++)
+        {
+            for (int pattern = 0; pattern < 6; pattern++)
+            {
+                TPixel[] background = new TPixel[length];
+                float[] coverage = new float[length];
+                for (int i = 0; i < length; i++)
+                {
+                    background[i] = TPixel.FromScaledVector4(
+                        new Vector4((float)random.NextDouble(), (float)random.NextDouble(), (float)random.NextDouble(), (float)random.NextDouble()));
+                    coverage[i] = pattern switch
+                    {
+                        0 => 1F,
+                        1 => random.Next(4) == 0 ? (float)random.NextDouble() : 1F,
+                        2 => (i < 2 || i >= length - 2) ? (float)random.NextDouble() : 1F,
+                        3 => i % 7 == 3 ? 0F : 1F,
+                        4 => random.Next(8) == 0 ? otherCoverage[random.Next(otherCoverage.Length)] : 1F,
+                        _ => (float)random.NextDouble(),
+                    };
+                }
+
+                TPixel source = TPixel.FromScaledVector4(new Vector4((float)random.NextDouble(), (float)random.NextDouble(), (float)random.NextDouble(), 1F));
+                float[] lowered = [.. coverage.Select(c => c == 1F ? MathF.BitDecrement(1F) : c)];
+                Vector4[] buffer = new Vector4[Math.Max(1, length * 2)];
+
+                TPixel[] actual = new TPixel[length];
+                blender.BlendWithCoverage(Configuration.Default, actual, background, source, 1F, coverage, buffer);
+
+                TPixel[] others = new TPixel[length];
+                blender.BlendWithCoverage(Configuration.Default, others, background, source, 1F, lowered, buffer);
+
+                // The destination may be the background.
+                TPixel[] inPlace = (TPixel[])background.Clone();
+                blender.BlendWithCoverage(Configuration.Default, inPlace, inPlace, source, 1F, coverage, buffer);
+
+                for (int i = 0; i < length; i++)
+                {
+                    TPixel expected = coverage[i] == 1F ? source : others[i];
+                    Assert.True(
+                        expected.Equals(actual[i]),
+                        $"{typeof(TPixel).Name}, length {length}, pattern {pattern}, pixel {i}: expected {expected}, actual {actual[i]}");
+                    Assert.Equal(actual[i], inPlace[i]);
+                }
+            }
+        }
+    }
 }
